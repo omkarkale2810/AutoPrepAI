@@ -23,6 +23,8 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 import plotly.express as px
 import plotly.graph_objects as go
+from sklearn.preprocessing import LabelEncoder, OneHotEncoder, OrdinalEncoder
+from sklearn.feature_extraction.text import TfidfVectorizer, CountVectorizer
 from datetime import datetime
 import warnings
 warnings.filterwarnings('ignore')
@@ -125,9 +127,14 @@ def analyze_data_quality(df):
         "data_types": {},
         "numeric_columns": [],
         "categorical_columns": [],
+        "text_columns": [],
+        "datetime_columns": [],
         "outliers": {},
-        "memory_usage": df.memory_usage(deep=True).sum() / 1024**2 
+        "memory_usage": df.memory_usage(deep=True).sum() / 1024**2,
+        "categorical_info": {},
+        "text_info": {}
     }
+    
     for col in df.columns:
         missing_count = df[col].isna().sum()
         quality_report["missing_data"][col] = {
@@ -136,15 +143,38 @@ def analyze_data_quality(df):
         }
         quality_report["data_types"][col] = str(df[col].dtype)
         
+        # Detect column types
         if df[col].dtype in ['int64', 'float64']:
             quality_report["numeric_columns"].append(col)
-            Q1 = df[col].quantile(0.25)
-            Q3 = df[col].quantile(0.75)
-            IQR = Q3 - Q1
-            outlier_count = ((df[col] < (Q1 - 1.5 * IQR)) | (df[col] > (Q3 + 1.5 * IQR))).sum()
-            quality_report["outliers"][col] = int(outlier_count)
-        else:
-            quality_report["categorical_columns"].append(col)
+            if not df[col].isna().all():
+                Q1 = df[col].quantile(0.25)
+                Q3 = df[col].quantile(0.75)
+                IQR = Q3 - Q1
+                outlier_count = ((df[col] < (Q1 - 1.5 * IQR)) | (df[col] > (Q3 + 1.5 * IQR))).sum()
+                quality_report["outliers"][col] = int(outlier_count)
+        
+        elif df[col].dtype == 'object':
+            # Check if it's text or categorical
+            unique_ratio = df[col].nunique() / len(df[col].dropna())
+            avg_length = df[col].dropna().astype(str).str.len().mean()
+            
+            if unique_ratio > 0.5 or avg_length > 50:  # Likely text data
+                quality_report["text_columns"].append(col)
+                quality_report["text_info"][col] = {
+                    "avg_length": round(avg_length, 2),
+                    "max_length": int(df[col].dropna().astype(str).str.len().max()),
+                    "unique_ratio": round(unique_ratio, 3)
+                }
+            else:  # Likely categorical
+                quality_report["categorical_columns"].append(col)
+                quality_report["categorical_info"][col] = {
+                    "unique_count": int(df[col].nunique()),
+                    "top_categories": df[col].value_counts().head(5).to_dict()
+                }
+        
+        # Check for datetime
+        elif 'datetime' in str(df[col].dtype):
+            quality_report["datetime_columns"].append(col)
     
     return quality_report
 
@@ -175,6 +205,116 @@ def visualize_data_quality(df, quality_report):
             st.subheader("Missing Data by Column")
             fig = px.bar(missing_df, x="Column", y="Missing %", title="Missing Data Percentage")
             st.plotly_chart(fig, use_container_width=True)
+
+def plot_feature_analysis(df, column_name, plot_type="auto"):
+    """Generate plots for feature analysis"""
+    if column_name not in df.columns:
+        st.error(f"Column '{column_name}' not found in dataset")
+        return
+    
+    col_data = df[column_name].dropna()
+    
+    if len(col_data) == 0:
+        st.warning(f"No data available for column '{column_name}' after removing null values")
+        return
+    
+    # Auto-detect plot type if not specified
+    if plot_type == "auto":
+        if df[column_name].dtype in ['int64', 'float64']:
+            plot_type = "histogram"
+        else:
+            plot_type = "countplot"
+    
+    fig, axes = plt.subplots(1, 2, figsize=(15, 6))
+    
+    # Plot 1: Based on data type
+    if plot_type == "histogram" and df[column_name].dtype in ['int64', 'float64']:
+        axes[0].hist(col_data, bins=30, alpha=0.7, color='skyblue', edgecolor='black')
+        axes[0].set_title(f'Distribution of {column_name}')
+        axes[0].set_xlabel(column_name)
+        axes[0].set_ylabel('Frequency')
+        
+        # Add statistics
+        mean_val = col_data.mean()
+        median_val = col_data.median()
+        axes[0].axvline(mean_val, color='red', linestyle='--', label=f'Mean: {mean_val:.2f}')
+        axes[0].axvline(median_val, color='green', linestyle='--', label=f'Median: {median_val:.2f}')
+        axes[0].legend()
+        
+    elif plot_type == "countplot":
+        value_counts = col_data.value_counts().head(20)  # Top 20 categories
+        axes[0].bar(range(len(value_counts)), value_counts.values, color='lightcoral')
+        axes[0].set_title(f'Top Categories in {column_name}')
+        axes[0].set_xlabel('Categories')
+        axes[0].set_ylabel('Count')
+        axes[0].set_xticks(range(len(value_counts)))
+        axes[0].set_xticklabels(value_counts.index, rotation=45, ha='right')
+    
+    # Plot 2: Missing data and basic stats
+    total_count = len(df[column_name])
+    missing_count = df[column_name].isna().sum()
+    present_count = total_count - missing_count
+    
+    missing_data = ['Present', 'Missing']
+    missing_counts = [present_count, missing_count]
+    colors = ['lightgreen', 'lightcoral']
+    
+    axes[1].pie(missing_counts, labels=missing_data, autopct='%1.1f%%', colors=colors)
+    axes[1].set_title(f'Missing Data in {column_name}')
+    
+    plt.tight_layout()
+    st.pyplot(fig)
+    plt.close()
+    
+    # Display summary statistics
+    st.subheader(f"Summary Statistics for '{column_name}'")
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.metric("Total Records", total_count)
+        st.metric("Missing Values", missing_count)
+        st.metric("Present Values", present_count)
+    
+    with col2:
+        st.metric("Unique Values", df[column_name].nunique())
+        if df[column_name].dtype in ['int64', 'float64']:
+            st.metric("Mean", f"{col_data.mean():.2f}" if len(col_data) > 0 else "N/A")
+            st.metric("Std Dev", f"{col_data.std():.2f}" if len(col_data) > 0 else "N/A")
+    
+    with col3:
+        if df[column_name].dtype in ['int64', 'float64']:
+            st.metric("Min", f"{col_data.min():.2f}" if len(col_data) > 0 else "N/A")
+            st.metric("Max", f"{col_data.max():.2f}" if len(col_data) > 0 else "N/A")
+            st.metric("Median", f"{col_data.median():.2f}" if len(col_data) > 0 else "N/A")
+        else:
+            most_common = col_data.mode()
+            st.metric("Most Common", str(most_common.iloc[0]) if len(most_common) > 0 else "N/A")
+            st.metric("Data Type", str(df[column_name].dtype))
+
+def generate_encoding_suggestions(df):
+    """Generate encoding suggestions for categorical and text columns"""
+    suggestions = []
+    quality_report = analyze_data_quality(df)
+    
+    # Categorical encoding suggestions
+    for col in quality_report["categorical_columns"]:
+        unique_count = df[col].nunique()
+        if unique_count <= 2:
+            suggestions.append(f"Apply Label Encoding to '{col}' (binary categorical, {unique_count} categories)")
+        elif unique_count <= 10:
+            suggestions.append(f"Apply One-Hot Encoding to '{col}' ({unique_count} categories)")
+        else:
+            suggestions.append(f"Apply Target/Frequency Encoding to '{col}' ({unique_count} categories - high cardinality)")
+    
+    # Text encoding suggestions
+    for col in quality_report["text_columns"]:
+        avg_length = quality_report["text_info"][col]["avg_length"]
+        if avg_length < 20:
+            suggestions.append(f"Apply TF-IDF Vectorization to '{col}' (short text, avg length: {avg_length:.1f})")
+        else:
+            suggestions.append(f"Apply advanced text preprocessing and vectorization to '{col}' (long text, avg length: {avg_length:.1f})")
+    
+    return suggestions
 
 def create_enhanced_vector_store(df, prompt):
     schema_info = []
@@ -231,71 +371,137 @@ def create_enhanced_vector_store(df, prompt):
             ))
     
     return FAISS.from_documents(documents, embeddings)
-
   
 def safe_execute_code(code, df):
+    """Enhanced safe execution with additional encoding libraries"""
     from RestrictedPython.PrintCollector import PrintCollector
+    from RestrictedPython.Guards import safe_builtins, guarded_iter_unpack_sequence
     
-    # restricted python environment to run the code 
-    restricted_globals = safe_globals.copy()
-    restricted_globals.update({
+    # Create a custom print collector
+    _print = PrintCollector()
+    
+    restricted_globals = {
+        # Data manipulation libraries
         "pd": pd,
         "np": np,
+        
+        # Encoding libraries
         "LabelEncoder": LabelEncoder,
+        "OneHotEncoder": OneHotEncoder,
+        "OrdinalEncoder": OrdinalEncoder,
+        "TfidfVectorizer": TfidfVectorizer,
+        "CountVectorizer": CountVectorizer,
+        
+        # Scaling libraries
         "StandardScaler": StandardScaler,
         "MinMaxScaler": MinMaxScaler,
         "RobustScaler": RobustScaler,
-        "OneHotEncoder": OneHotEncoder,
-        "OrdinalEncoder": OrdinalEncoder,
+        
+        # Imputation libraries
         "SimpleImputer": SimpleImputer,
         "KNNImputer": KNNImputer,
+        
+        # Feature selection
         "SelectKBest": SelectKBest,
         "f_classif": f_classif,
         "f_regression": f_regression,
+        
+        # DataFrame
         "df": df.copy(),
+        
+        # RestrictedPython required functions
         "_print_": PrintCollector,
         "_getattr_": getattr,
         "_getitem_": lambda obj, index: obj[index],
         "_getiter_": iter,
-        "_iter_unpack_sequence_": lambda it, spec: list(it),
+        "_iter_unpack_sequence_": guarded_iter_unpack_sequence,
+        "_write_": lambda x: x,  # This was missing!
+        "__import__" : __import__,
+        
+        # Exception handling
         "Exception": Exception,
         "ValueError": ValueError,
         "TypeError": TypeError,
         "KeyError": KeyError,
         "IndexError": IndexError,
         "AttributeError": AttributeError,
-    })
-    restricted_globals["__builtins__"] = limited_builtins
+        
+        # Built-in functions
+        "len": len,
+        "str": str,
+        "int": int,
+        "float": float,
+        "list": list,
+        "dict": dict,
+        "tuple": tuple,
+        "set": set,
+        "range": range,
+        "enumerate": enumerate,
+        "zip": zip,
+        "max": max,
+        "min": min,
+        "sum": sum,
+        "round": round,
+        "abs": abs,
+        "sorted": sorted,
+        
+        # Print functionality
+        "print": _print,
+        "_print": _print,
+        
+        # Safe builtins
+        "__builtins__": {
+            **safe_builtins,
+            "_print_": PrintCollector,
+            "_getattr_": getattr,
+            "_getitem_": lambda obj, index: obj[index],
+            "_getiter_": iter,
+            "_iter_unpack_sequence_": guarded_iter_unpack_sequence,
+            "_write_": lambda x: x,
+        }
+    }
     
     try:
-        
+        from RestrictedPython import compile_restricted
         compiled_code = compile_restricted(code, "<string>", "exec")
         if compiled_code is None:
             raise ValueError("Code compilation failed - potentially unsafe code detected")
         
+        # Execute the compiled code
         exec(compiled_code, restricted_globals)
         
+        # Get the result DataFrame
         result_df = restricted_globals.get("df")
-        
         if result_df is None:
             raise ValueError("Code did not return a DataFrame")
         
+        # Collect print output
         print_output = ""
-        if "_print" in restricted_globals:
-            print_collector = restricted_globals["_print"]
-            if hasattr(print_collector, 'txt'):
-                print_output = print_collector.txt
+        if hasattr(_print, 'txt'):
+            print_output = ''.join(_print.txt)  # Join the list of strings
         
         return result_df, print_output
         
     except Exception as e:
-        return None, f"Execution Error: {str(e)}"
+        error_msg = f"Execution Error: {str(e)}"
+        # Also try to get any partial print output
+        partial_output = ""
+        try:
+            if hasattr(_print, 'txt'):
+                partial_output = ''.join(_print.txt)
+        except:
+            pass
+        
+        full_output = f"{partial_output}\n{error_msg}" if partial_output else error_msg
+        return None, full_output
 
+# --------------------------------------------------------------------------
 
-# --------------------------------------------------------------------------------
 def analyze_data_and_suggest_steps(df):
-    
+    """Enhanced suggestion system with encoding steps"""
     quality_report = analyze_data_quality(df)
+    encoding_suggestions = generate_encoding_suggestions(df)
+    
     prompt = f"""
     You are an expert data scientist. Analyze this dataset and provide a comprehensive preprocessing plan.
     
@@ -306,19 +512,24 @@ def analyze_data_and_suggest_steps(df):
     - Duplicates: {quality_report['duplicates']}
     - Numeric columns: {quality_report['numeric_columns']}
     - Categorical columns: {quality_report['categorical_columns']}
+    - Text columns: {quality_report['text_columns']}
+    - Datetime columns: {quality_report['datetime_columns']}
     - Outliers: {dict(quality_report['outliers'])}
+    - Categorical info: {quality_report['categorical_info']}
+    - Text info: {quality_report['text_info']}
     
-    Provide a step-by-step preprocessing plan as a data scientist would approach this dataset.
-    Format your response as numbered steps, each step should be a single actionable preprocessing task.
+    ENCODING SUGGESTIONS:
+    {chr(10).join(encoding_suggestions)}
     
-    Example format:
-    1. Remove duplicate rows (found X duplicates)
-    2. Handle missing values in column Y using median imputation
-    3. Encode categorical variable Z using label encoding
-    4. Scale numerical features using StandardScaler
-    5. Remove outliers from column A using IQR method
+    Provide a step-by-step preprocessing plan including:
+    1. Data cleaning (duplicates, missing values)
+    2. Categorical encoding (Label, One-Hot, Ordinal)
+    3. Text vectorization (TF-IDF, Count)
+    4. Feature scaling
+    5. Outlier handling
     
-    Provide 5-10 specific steps based on the actual data issues found.
+    Format as numbered steps, each being a single actionable task.
+    Prioritize encoding steps for categorical and text data. After doinf any encoding or remove the original column as well.
     """
     
     try:
@@ -333,25 +544,25 @@ def analyze_data_and_suggest_steps(df):
         for line in lines:
             line = line.strip()
             if line and (line[0].isdigit() or line.startswith('-')):
-    
                 step = line.split('.', 1)[-1].strip() if '.' in line else line.strip('- ')
                 if step:
                     steps.append(step)
         
-        return steps[:12] 
+        return steps[:12]
         
     except Exception as e:
         st.error(f"Error generating suggestions: {str(e)}")
         return [
             "Remove duplicate rows if any",
             "Handle missing values using appropriate imputation",
-            "Encode categorical variables",
+            "Encode categorical variables using Label/One-Hot encoding",
+            "Vectorize text data using TF-IDF",
             "Scale numerical features",
             "Handle outliers if present"
         ]
 
 def generate_step_code(step_description, df, conversation_context=""):
-
+    """Enhanced code generation with encoding capabilities"""
     data_info = f"""
     Current dataset info:
     - Shape: {df.shape}
@@ -361,6 +572,15 @@ def generate_step_code(step_description, df, conversation_context=""):
     - Sample data: {df.head(2).to_dict()}
     """
     
+    quality_report = analyze_data_quality(df)
+    encoding_context = f"""
+    - Categorical columns: {quality_report['categorical_columns']}
+    - Text columns: {quality_report['text_columns']}
+    - Categorical info: {quality_report['categorical_info']}
+    - Text info: {quality_report['text_info']}
+    """
+    
+    # Fixed prompt with proper string escaping
     prompt = f"""
     You are an expert data scientist. Generate Python code for this specific preprocessing step.
     
@@ -369,30 +589,53 @@ def generate_step_code(step_description, df, conversation_context=""):
     CURRENT DATASET INFO:
     {data_info}
     
+    ENCODING CONTEXT:
+    {encoding_context}
+    
     CONVERSATION CONTEXT:
     {conversation_context}
     
     REQUIREMENTS:
     1. Work with DataFrame variable 'df'
     2. Implement ONLY the specified step
-    3. Add informative print statements about what's being done
-    4. Use try-except for error handling
-    5. Return the modified DataFrame at the end
-    6. Be specific and targeted - don't do extra steps
+    3. For categorical encoding:
+       - Use LabelEncoder for binary/ordinal data
+       - Use OneHotEncoder for nominal data with few categories
+       - Use pd.get_dummies as alternative to OneHotEncoder
+    4. For text vectorization:
+       - Use TfidfVectorizer for text features
+       - Create new columns with vectorized features
+    5. Add informative print statements
+    6. Use try-except for error handling
+    7. Handle edge cases (empty data, all null values)
+    8. Return the modified DataFrame
     
-    EXAMPLE STRUCTURE:
-    ```python
-    print("Step X: [Description of what you're doing]")
-    try:
-        # Your specific preprocessing code here
-        print(f"Action completed successfully. New shape: {{df.shape}}")
-    except Exception as e:
-        print(f"Error in step: {{e}}")
+    EXAMPLE ENCODING PATTERNS:
     
-    df
+    For Label Encoding:
+    ```
+    le = LabelEncoder()
+    df['column_encoded'] = le.fit_transform(df['column'].fillna('Unknown'))
     ```
     
-    Generate ONLY the Python code, no explanations outside the code.
+    For One-Hot Encoding:
+    ```
+    # Using pandas get_dummies
+    dummy_cols = pd.get_dummies(df['column'], prefix='column')
+    df = pd.concat([df.drop('column', axis=1), dummy_cols], axis=1)
+    ```
+    
+    For Text Vectorization:
+    ```
+    tfidf = TfidfVectorizer(max_features=100, stop_words='english')
+    text_features = tfidf.fit_transform(df['text_column'].fillna(''))
+    # Create column names for TF-IDF features
+    feature_names = [f'tfidf_{{i}}' for i in range(text_features.shape[1])]
+    tfidf_df = pd.DataFrame(text_features.toarray(), columns=feature_names)
+    df = pd.concat([df.reset_index(drop=True), tfidf_df], axis=1)
+    ```
+    
+    Generate ONLY the Python code, no explanations outside the code,and no any import statement in the code.
     """
     
     try:
@@ -465,6 +708,31 @@ def execute_preprocessing_step(step_description, df):
         return result_df, output, True
     else:
         return df, output, False
+
+def Feature_plot_functionality_for_manual_mode():
+    """Enhanced manual mode with plotting capabilities"""
+    st.subheader("Feature Analysis & Preprocessing")
+    
+    # Feature selection for analysis
+    current_df = st.session_state.preprocessed_df if st.session_state.preprocessed_df is not None else st.session_state.df
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.write("**Analyze Feature Before Preprocessing:**")
+        selected_column = st.selectbox(
+            "Select column to analyze:",
+            options=current_df.columns.tolist(),
+            key="analysis_column"
+        )
+        
+        plot_types = ["auto", "histogram", "countplot", "boxplot"]
+        plot_type = st.selectbox("Plot type:", plot_types, key="plot_type")
+        
+        if st.button("🔍 Analyze & Plot Feature"):
+            with st.expander(f"Analysis of '{selected_column}'", expanded=True):
+                plot_feature_analysis(current_df, selected_column, plot_type)
+
 
 st.header("Upload Your Dataset in CSV format")
 uploaded_file = st.file_uploader(
@@ -591,6 +859,8 @@ if st.session_state.df is not None:
         # Manual mode - user input
         elif not st.session_state.auto_mode and not st.session_state.preprocessing_complete:
             st.subheader("Your Turn!")
+            
+            Feature_plot_functionality_for_manual_mode()
 
             if st.session_state.suggested_steps:
                 st.write("**Quick Actions (Click to execute):**")
