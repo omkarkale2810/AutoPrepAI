@@ -528,8 +528,8 @@ def analyze_data_and_suggest_steps(df):
     4. Feature scaling
     5. Outlier handling
     
-    Format as numbered steps, each being a single actionable task.
-    Prioritize encoding steps for categorical and text data. After doinf any encoding or remove the original column as well.
+    Format as numbered steps and No any import statement in the code. each being a single actionable task.
+    Prioritize encoding steps for categorical and text data. After doing any encoding or remove the original column as well.
     """
     
     try:
